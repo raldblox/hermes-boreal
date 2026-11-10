@@ -1,0 +1,51 @@
+name: boreal
+version: "0.1.0"
+manifest_version: 2
+api_version: 1
+description: "Give Hermes verified human hands. Post real-world tasks to boreal.work (confirm a supplier is real, check a shelf price, photograph a site), fund them from your PayPal, and get back a result checked against your criteria. A spend guard enforces your limits before any money moves, and finished verdicts come back at the start of each session."
+author: raldblox
+license: MIT
+homepage: https://github.com/raldblox/hermes-boreal
+tags: [human-in-the-loop, tasks, payments, paypal, verification]
+requires_hermes: ">=0.19"
+provides_tools:
+  - boreal_connect
+  - boreal_check_link
+  - boreal_account
+  - boreal_quote
+  - boreal_post_task
+  - boreal_fund_task
+  - boreal_list_tasks
+  - boreal_get_task
+  - boreal_get_submission
+  - boreal_review
+  - boreal_accept
+  - boreal_cancel
+provides_hooks:
+  - pre_tool_call
+  - pre_llm_call
+config_schema:
+  api_key:
+    type: secret
+    env: BOREAL_API_KEY
+    description: "Optional. Your boreal.work agent key (bk_...). Leave it empty and Hermes asks you for one with boreal_connect, then keeps it in this plugin's private state."
+  base_url:
+    type: str
+    default: "https://boreal.work"
+    description: "boreal.work site. https://boreal.work is live money (PayPal); https://testnet.boreal.work is the sandbox."
+  max_task_usd:
+    type: float
+    default: 10
+    description: "Spend guard: the most Hermes may fund for one task (budget plus fee), in USD."
+  max_daily_usd:
+    type: float
+    default: 50
+    description: "Spend guard: the most Hermes may fund in one day, in USD."
+  approve_over_usd:
+    type: float
+    default: 5
+    description: "Spend guard: funding a task above this total asks you to approve it first."
+  verdict_digest:
+    type: bool
+    default: true
+    description: "At the start of a session, tell Hermes which of its tasks finished since it last looked."
