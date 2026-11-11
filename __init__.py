@@ -101,8 +101,26 @@ def _out(value: Any) -> str:
     return json.dumps(value, default=str)
 
 
+def _collect_pending_key() -> bool:
+    """If a link is waiting for this site, ask boreal.work once whether the owner approved it. True if a key arrived."""
+    link = _state_get("link") or {}
+    if not link.get("pollToken") or link.get("site") != _base_url():
+        return False
+    reply = client.call(_base_url(), "POST", "/api/v1/link/poll", body={"pollToken": link["pollToken"]}, timeout=8)
+    body = reply.body if isinstance(reply.body, dict) else {}
+    if body.get("status") == "approved" and body.get("key"):
+        keys = _state_get("keys", {}) or {}
+        keys[_base_url()] = body["key"]
+        _state_set("keys", keys)
+        _state_set("link", None)
+        return True
+    if body.get("status") in {"expired", "denied", "collected"}:
+        _state_set("link", None)
+    return False
+
+
 def _need_key() -> Optional[str]:
-    if _key():
+    if _key() or _collect_pending_key():
         return None
     return _out({"error": "not_connected", "message": "No boreal.work key yet. Call boreal_connect with your name, send your owner the approveUrl, then boreal_check_link."})
 
@@ -148,7 +166,7 @@ def boreal_check_link(args: dict, **_: Any) -> str:
 
 
 def boreal_account(args: dict, **_: Any) -> str:
-    if not _key():
+    if not _key() and not _collect_pending_key():
         return _out({"connected": False, "site": _base_url(), "next": "Call boreal_connect to ask your owner for a key."})
     reply = _api("GET", "/api/v1/me")
     result = reply.as_tool_result()
@@ -320,18 +338,18 @@ def status_command(raw_args: str = "", **_: Any) -> str:
         result = json.loads(boreal_connect({"agent_name": "Hermes", "description": "Hires verified people for real-world steps"}))
         if result.get("approveUrl"):
             return (f"boreal.work ({_base_url()}): open {result['approveUrl']} to approve Hermes (sign in, set its limits, approve). "
-                    "Then run /borealwork check. The link expires in 15 minutes.")
+                    "Hermes picks the key up by itself once you have (or run /borealwork check). The link expires in 15 minutes.")
         return f"boreal.work ({_base_url()}): couldn't start the link: {result.get('message') or result.get('error') or result}"
     if verb == "check":
         result = json.loads(boreal_check_link({}))
         if result.get("status") == "approved":
             return f"boreal.work ({_base_url()}): connected. Hermes can now post and fund tasks within your limits."
         return f"boreal.work ({_base_url()}): {result.get('status') or result.get('message') or result.get('error')}. Approve the link first, then run /borealwork check again."
-    if not _key():
+    if not _key() and not _collect_pending_key():
         link = _state_get("link") or {}
         if link.get("site") == _base_url() and link.get("approveUrl"):
             return (f"boreal.work ({_base_url()}): waiting for your approval. Open {link['approveUrl']}, sign in, set Hermes's limits "
-                    f"and approve; then ask Hermes to check the link. Links expire after 15 minutes: if it has, ask Hermes to connect again.")
+                    f"and approve. Hermes picks the key up by itself once you have. Links expire after 15 minutes: then run /borealwork connect again.")
         return f"boreal.work ({_base_url()}): not connected. Run /borealwork connect (or ask Hermes to connect to boreal.work)."
     me = _api("GET", "/api/v1/me", timeout=8)
     tasks = _api("GET", "/api/v1/tasks", timeout=8)

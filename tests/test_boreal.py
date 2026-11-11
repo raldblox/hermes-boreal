@@ -183,5 +183,13 @@ class BorealTest(unittest.TestCase):
         self.assertEqual(boreal._key(), "bk_new")
 
 
+    def test_a_pending_link_is_collected_without_asking(self):
+        self.ctx.state.set("keys", {})
+        self.ctx.state.set("link", {"site": "https://boreal.work", "pollToken": "p", "approveUrl": "https://boreal.work/link/X"})
+        self.fake({("POST", "/api/v1/link/poll"): (200, {"status": "approved", "key": "bk_auto"}), ("GET", "/api/v1/me"): (200, {"network": "mainnet"}), ("GET", "/api/v1/tasks"): (200, [])})
+        self.assertNotIn("waiting", self.ctx.commands["borealwork"](""))
+        self.assertEqual(boreal._key(), "bk_auto")
+
+
 if __name__ == "__main__":
     unittest.main()
