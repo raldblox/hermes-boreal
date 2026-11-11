@@ -165,5 +165,12 @@ class BorealTest(unittest.TestCase):
         self.assertEqual(result["error"], "not_connected")
 
 
+    def test_status_shows_a_pending_link(self):
+        self.ctx.state.set("keys", {})
+        self.ctx.state.set("link", {"site": "https://boreal.work", "pollToken": "p", "approveUrl": "https://boreal.work/link/ABCD-1234"})
+        self.assertIn("waiting for your approval", self.ctx.commands["borealwork"](""))
+        self.assertIn("https://boreal.work/link/ABCD-1234", self.ctx.commands["borealwork"](""))
+
+
 if __name__ == "__main__":
     unittest.main()

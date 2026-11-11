@@ -126,7 +126,7 @@ def boreal_connect(args: dict, **_: Any) -> str:
         return _out({"error": "invalid", "message": "agent_name is required"})
     reply = client.call(_base_url(), "POST", "/api/v1/link", body={"agentName": name, "agentDescription": args.get("description") or None})
     if reply.ok and isinstance(reply.body, dict) and reply.body.get("pollToken"):
-        _state_set("link", {"site": _base_url(), "pollToken": reply.body["pollToken"]})
+        _state_set("link", {"site": _base_url(), "pollToken": reply.body["pollToken"], "approveUrl": reply.body.get("approveUrl"), "expiresAt": reply.body.get("expiresAt")})
         body = {k: v for k, v in reply.body.items() if k != "pollToken"}
         return _out({**body, "next": "Send your owner the approveUrl. They log in, set your limits and approve. Then call boreal_check_link."})
     return _out(reply.as_tool_result())
@@ -316,6 +316,10 @@ def digest(is_first_turn: bool = False, **_: Any) -> Optional[str]:
 
 def status_command(raw_args: str = "", **_: Any) -> str:
     if not _key():
+        link = _state_get("link") or {}
+        if link.get("site") == _base_url() and link.get("approveUrl"):
+            return (f"boreal.work ({_base_url()}): waiting for your approval. Open {link['approveUrl']}, sign in, set Hermes's limits "
+                    f"and approve; then ask Hermes to check the link. Links expire after 15 minutes: if it has, ask Hermes to connect again.")
         return f"boreal.work ({_base_url()}): not connected. Ask Hermes to connect to boreal.work."
     me = _api("GET", "/api/v1/me", timeout=8)
     tasks = _api("GET", "/api/v1/tasks", timeout=8)
