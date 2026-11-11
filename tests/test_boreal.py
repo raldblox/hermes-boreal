@@ -172,5 +172,16 @@ class BorealTest(unittest.TestCase):
         self.assertIn("https://boreal.work/link/ABCD-1234", self.ctx.commands["borealwork"](""))
 
 
+    def test_slash_command_connects_and_checks(self):
+        self.ctx.state.set("keys", {})
+        self.fake({
+            ("POST", "/api/v1/link"): (201, {"code": "ABCD-1234", "approveUrl": "https://boreal.work/link/ABCD-1234", "pollToken": "p"}),
+            ("POST", "/api/v1/link/poll"): (200, {"status": "approved", "key": "bk_new"}),
+        })
+        self.assertIn("https://boreal.work/link/ABCD-1234", self.ctx.commands["borealwork"]("connect"))
+        self.assertIn("connected", self.ctx.commands["borealwork"]("check"))
+        self.assertEqual(boreal._key(), "bk_new")
+
+
 if __name__ == "__main__":
     unittest.main()

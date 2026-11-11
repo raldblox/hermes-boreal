@@ -315,12 +315,24 @@ def digest(is_first_turn: bool = False, **_: Any) -> Optional[str]:
 # ---------- /boreal ----------
 
 def status_command(raw_args: str = "", **_: Any) -> str:
+    verb = (raw_args or "").strip().lower()
+    if verb == "connect":
+        result = json.loads(boreal_connect({"agent_name": "Hermes", "description": "Hires verified people for real-world steps"}))
+        if result.get("approveUrl"):
+            return (f"boreal.work ({_base_url()}): open {result['approveUrl']} to approve Hermes (sign in, set its limits, approve). "
+                    "Then run /borealwork check. The link expires in 15 minutes.")
+        return f"boreal.work ({_base_url()}): couldn't start the link: {result.get('message') or result.get('error') or result}"
+    if verb == "check":
+        result = json.loads(boreal_check_link({}))
+        if result.get("status") == "approved":
+            return f"boreal.work ({_base_url()}): connected. Hermes can now post and fund tasks within your limits."
+        return f"boreal.work ({_base_url()}): {result.get('status') or result.get('message') or result.get('error')}. Approve the link first, then run /borealwork check again."
     if not _key():
         link = _state_get("link") or {}
         if link.get("site") == _base_url() and link.get("approveUrl"):
             return (f"boreal.work ({_base_url()}): waiting for your approval. Open {link['approveUrl']}, sign in, set Hermes's limits "
                     f"and approve; then ask Hermes to check the link. Links expire after 15 minutes: if it has, ask Hermes to connect again.")
-        return f"boreal.work ({_base_url()}): not connected. Ask Hermes to connect to boreal.work."
+        return f"boreal.work ({_base_url()}): not connected. Run /borealwork connect (or ask Hermes to connect to boreal.work)."
     me = _api("GET", "/api/v1/me", timeout=8)
     tasks = _api("GET", "/api/v1/tasks", timeout=8)
     lines = [f"boreal.work ({_base_url()})"]
@@ -342,4 +354,4 @@ def register(ctx) -> None:
         ctx.register_tool(name=schema["name"], toolset=TOOLSET, schema=schema, handler=HANDLERS[schema["name"]], emoji="🌲")
     ctx.register_hook("pre_tool_call", guard)
     ctx.register_hook("pre_llm_call", digest)
-    ctx.register_command("borealwork", handler=status_command, description="boreal.work: account, today's spend, open tasks")
+    ctx.register_command("borealwork", handler=status_command, description="boreal.work: status; 'connect' to link Hermes, 'check' once approved", args_hint="[connect|check]")
