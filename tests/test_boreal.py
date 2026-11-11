@@ -191,5 +191,20 @@ class BorealTest(unittest.TestCase):
         self.assertEqual(boreal._key(), "bk_auto")
 
 
+    def test_connect_reuses_a_link_that_is_still_waiting(self):
+        self.ctx.state.set("keys", {})
+        self.ctx.state.set("link", {"site": "https://boreal.work", "pollToken": "p", "approveUrl": "https://boreal.work/link/FIRST", "expiresAt": "2999-01-01T00:00:00Z"})
+        fake = self.fake({("POST", "/api/v1/link/poll"): (200, {"status": "pending"})})
+        result = json.loads(self.ctx.tools["boreal_connect"]({"agent_name": "Hermes"}))
+        self.assertEqual(result["approveUrl"], "https://boreal.work/link/FIRST")
+        self.assertNotIn(("POST", "/api/v1/link"), [(c[1], c[2]) for c in fake.calls])
+
+    def test_connect_makes_a_new_link_once_the_old_one_expired(self):
+        self.ctx.state.set("keys", {})
+        self.ctx.state.set("link", {"site": "https://boreal.work", "pollToken": "p", "approveUrl": "https://boreal.work/link/OLD", "expiresAt": "2000-01-01T00:00:00Z"})
+        self.fake({("POST", "/api/v1/link/poll"): (200, {"status": "expired"}), ("POST", "/api/v1/link"): (201, {"approveUrl": "https://boreal.work/link/NEW", "pollToken": "q"})})
+        self.assertEqual(json.loads(self.ctx.tools["boreal_connect"]({"agent_name": "Hermes"}))["approveUrl"], "https://boreal.work/link/NEW")
+
+
 if __name__ == "__main__":
     unittest.main()

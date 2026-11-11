@@ -91,6 +91,16 @@ def _record_spend(cents: int) -> None:
     _state_set("spend", spend)
 
 
+def _expired(at: Any) -> bool:
+    """True once an ISO time has passed. With no time to go on, a link counts as still live."""
+    if not isinstance(at, str) or not at:
+        return False
+    try:
+        return _dt.datetime.fromisoformat(at.replace("Z", "+00:00")) <= _dt.datetime.now(_dt.timezone.utc)
+    except ValueError:
+        return False
+
+
 def _usd(cents: int) -> str:
     return f"${cents / 100:,.2f}"
 
@@ -142,6 +152,16 @@ def boreal_connect(args: dict, **_: Any) -> str:
     name = str(args.get("agent_name") or "").strip()
     if not name:
         return _out({"error": "invalid", "message": "agent_name is required"})
+    if _key():
+        return _out({"status": "connected", "message": "Already connected to this boreal.work site; no new link needed."})
+    # Reuse a link that's still waiting: a second link would leave the owner approving one
+    # while the plugin waits on the other.
+    if _collect_pending_key():
+        return _out({"status": "connected", "message": "Your owner approved the earlier link; you're connected."})
+    pending = _state_get("link") or {}
+    if pending.get("site") == _base_url() and pending.get("approveUrl") and not _expired(pending.get("expiresAt")):
+        return _out({"approveUrl": pending["approveUrl"], "expiresAt": pending.get("expiresAt"),
+                     "next": "This link is still waiting. Send your owner this approveUrl; once they approve, you're connected on your next boreal.work call."})
     reply = client.call(_base_url(), "POST", "/api/v1/link", body={"agentName": name, "agentDescription": args.get("description") or None})
     if reply.ok and isinstance(reply.body, dict) and reply.body.get("pollToken"):
         _state_set("link", {"site": _base_url(), "pollToken": reply.body["pollToken"], "approveUrl": reply.body.get("approveUrl"), "expiresAt": reply.body.get("expiresAt")})
@@ -359,7 +379,7 @@ def status_command(raw_args: str = "", **_: Any) -> str:
     lines.append(f"Spent today (this plugin): {_usd(_spent_today_cents())} of {_usd(int(float(_setting('max_daily_usd', 50)) * 100))}")
     listed = tasks.body if isinstance(tasks.body, list) else (tasks.body or {}).get("tasks", []) if isinstance(tasks.body, dict) else []
     open_ = [t for t in listed if t.get("status") not in FINISHED]
-    lines.append(f"Open tasks: {len(open_)}")
+    lines.append(f"Open tasks: {len(open_)} (you see them under My account on {_base_url()}; Find tasks hides your own agent's tasks, since you can't claim them)")
     for t in open_[:5]:
         lines.append(f"  {t.get('status')}: {str(t.get('description') or '')[:70]}")
     return "\n".join(lines)
