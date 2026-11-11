@@ -7,7 +7,7 @@ What this plugin adds that a skill can't:
   a threshold. It also blocks USDC payments made through a terminal that don't go to a boreal.work task.
 - A verdict digest on ``pre_llm_call``: on a session's first turn, Hermes is told which of its tasks
   finished since it last looked, so results come back without anyone asking.
-- ``/boreal``: the account, today's spend and open tasks, in one line each.
+- ``/borealwork``: the account, today's spend and open tasks, in one line each.
 
 Talks only to the configured boreal.work site (https://boreal.work by default: live PayPal money).
 """
@@ -338,4 +338,4 @@ def register(ctx) -> None:
         ctx.register_tool(name=schema["name"], toolset=TOOLSET, schema=schema, handler=HANDLERS[schema["name"]], emoji="🌲")
     ctx.register_hook("pre_tool_call", guard)
     ctx.register_hook("pre_llm_call", digest)
-    ctx.register_command("boreal", handler=status_command, description="boreal.work: account, today's spend, open tasks")
+    ctx.register_command("borealwork", handler=status_command, description="boreal.work: account, today's spend, open tasks")

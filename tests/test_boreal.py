@@ -79,7 +79,7 @@ class BorealTest(unittest.TestCase):
     def test_registers_every_declared_tool_and_hook(self):
         self.assertEqual(set(self.ctx.tools), {s["name"] for s in boreal.schemas.ALL})
         self.assertEqual(set(self.ctx.hooks), {"pre_tool_call", "pre_llm_call"})
-        self.assertIn("boreal", self.ctx.commands)
+        self.assertIn("borealwork", self.ctx.commands)
 
     def test_defaults_to_live_boreal_work(self):
         fake = self.fake({("GET", "/api/v1/me"): (200, {"network": "mainnet"})})

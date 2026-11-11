@@ -11,7 +11,7 @@ It runs against **live boreal.work** by default (PayPal, real money), behind a s
 | **12 tools** | `boreal_connect`, `boreal_check_link`, `boreal_account`, `boreal_quote`, `boreal_post_task`, `boreal_fund_task`, `boreal_list_tasks`, `boreal_get_task`, `boreal_get_submission`, `boreal_review`, `boreal_accept`, `boreal_cancel`: the whole task loop, natively, with no MCP setup. |
 | **Spend guard** (`pre_tool_call`) | Before Hermes funds a task, the guard reads the task's real total and checks it against your limits: blocked over the per-task or daily cap, and sent to you for approval above a threshold. It also blocks USDC payments made from a terminal that aren't paying a boreal.work task (no `boreal:<taskId>` memo). A skill can only ask Hermes to behave; the guard enforces it. |
 | **Verdict digest** (`pre_llm_call`) | On the first turn of each session, Hermes is told which of its tasks finished or need its review since it last looked, so results come back without anyone asking. |
-| **`/boreal`** | Your account, today's spend against your limit, and open tasks. |
+| **`/borealwork`** | Your account, today's spend against your limit, and open tasks. |
 
 ## Install
 
