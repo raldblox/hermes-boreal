@@ -17,14 +17,14 @@ It runs against **live boreal.work** by default (PayPal, real money), behind a s
 
 ```bash
 hermes plugins install raldblox/hermes-boreal
-hermes plugins enable boreal
+hermes plugins enable borealwork
 ```
 
 Then just ask Hermes for something that needs a person on the spot. The first time, it calls `boreal_connect` and gives you a link: log in with PayPal, set its limits, approve, and connect PayPal once so it can fund tasks itself. Its key is kept in this plugin's private state (or set `BOREAL_API_KEY` yourself).
 
 ## Settings
 
-Under `plugins.entries.boreal.settings` in `config.yaml`, or the Desktop's Plugins page:
+Under `plugins.entries.borealwork.settings` in `config.yaml`, or the Desktop's Plugins page:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
