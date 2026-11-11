@@ -2,9 +2,10 @@
 
 What this plugin adds that a skill can't:
 - Native tools for the whole task loop (connect, quote, post, fund, check, review, accept, cancel).
-- A spend guard on ``pre_tool_call``: before any boreal.work funding, it checks the task's total
-  against the owner's per-task and daily caps set here, and asks the owner to approve anything above
-  a threshold. It also blocks USDC payments made through a terminal that don't go to a boreal.work task.
+- A spend guard on ``pre_tool_call``: every call that moves money (funding a task, accepting a pass,
+  judging a result yourself) goes to Hermes's approval prompt, at any amount. Funding is also held to
+  the owner's per-task and daily caps set here. It blocks USDC payments made through a terminal that
+  don't go to a boreal.work task.
 - A verdict digest on ``pre_llm_call``: on a session's first turn, Hermes is told which of its tasks
   finished since it last looked, so results come back without anyone asking.
 - ``/borealwork``: the account, today's spend and open tasks, in one line each.
@@ -18,6 +19,7 @@ import datetime as _dt
 import json
 import logging
 import re
+import urllib.parse
 from typing import Any, Optional
 
 from . import client, schemas
@@ -135,6 +137,11 @@ def _need_key() -> Optional[str]:
     return _out({"error": "not_connected", "message": "No boreal.work key yet. Call boreal_connect with your name, send your owner the approveUrl, then boreal_check_link."})
 
 
+def _task_path(task_id: Any, suffix: str = "") -> str:
+    """The API path for a task, with its id quoted so it can't reach another route."""
+    return f"/api/v1/tasks/{urllib.parse.quote(str(task_id or ''), safe='')}{suffix}"
+
+
 def _api(method: str, path: str, **kwargs: Any) -> client.Reply:
     return client.call(_base_url(), method, path, key=_key(), **kwargs)
 
@@ -193,7 +200,7 @@ def boreal_account(args: dict, **_: Any) -> str:
     result["spendGuard"] = {
         "maxTask": _usd(int(float(_setting("max_task_usd", 10)) * 100)),
         "maxDaily": _usd(int(float(_setting("max_daily_usd", 50)) * 100)),
-        "approveOver": _usd(int(float(_setting("approve_over_usd", 5)) * 100)),
+        "approval": "Hermes asks you before every funding, acceptance and verdict.",
         "spentToday": _usd(_spent_today_cents()),
     }
     result["site"] = _base_url()
@@ -227,9 +234,9 @@ def boreal_fund_task(args: dict, **_: Any) -> str:
     if (missing := _need_key()):
         return missing
     task_id = str(args.get("task_id") or "")
-    before = _api("GET", f"/api/v1/tasks/{task_id}")
+    before = _api("GET", _task_path(task_id))
     body = {"orderId": args["order_id"]} if args.get("order_id") else None
-    reply = _api("POST", f"/api/v1/tasks/{task_id}/fund", body=body)
+    reply = _api("POST", _task_path(task_id, "/fund"), body=body)
     result = reply.as_tool_result()
     status = (reply.body or {}).get("status") if isinstance(reply.body, dict) else None
     if reply.ok and status and status != "awaiting_funding":
@@ -251,7 +258,7 @@ def _by_task(method: str, suffix: str = "", body: Any = None):
     def handler(args: dict, **_: Any) -> str:
         if (missing := _need_key()):
             return missing
-        return _out(_api(method, f"/api/v1/tasks/{args.get('task_id')}{suffix}", body=body).as_tool_result())
+        return _out(_api(method, _task_path(args.get("task_id"), suffix), body=body).as_tool_result())
     return handler
 
 
@@ -259,7 +266,7 @@ def boreal_review(args: dict, **_: Any) -> str:
     if (missing := _need_key()):
         return missing
     body = {"outcome": args.get("outcome"), "ruleIds": args.get("rule_ids") or [], "reasoning": args.get("reasoning") or ""}
-    return _out(_api("POST", f"/api/v1/tasks/{args.get('task_id')}/review", body=body).as_tool_result())
+    return _out(_api("POST", _task_path(args.get("task_id"), "/review"), body=body).as_tool_result())
 
 
 HANDLERS = {
@@ -289,6 +296,11 @@ def guard(tool_name: str = "", args: Any = None, **_: Any) -> Optional[dict]:
     args = args if isinstance(args, dict) else {}
     if tool_name == "boreal_fund_task":
         return _guard_funding(args)
+    if tool_name == "boreal_accept":
+        return _guard_release(args, "Accept the passed result of")
+    if tool_name == "boreal_review":
+        verdict = "a pass" if args.get("outcome") == "pass" else "a fail" if args.get("outcome") == "fail" else "a verdict"
+        return _guard_release(args, f"Record {verdict} on")
     if tool_name in {"terminal", "shell", "execute_code"}:
         command = str(args.get("command") or args.get("code") or "")
         if _PAYMENT_COMMAND.search(command) and not _BOREAL_MEMO.search(command):
@@ -300,29 +312,44 @@ def guard(tool_name: str = "", args: Any = None, **_: Any) -> Optional[dict]:
     return None
 
 
+def _read_task(task_id: str) -> Optional[dict]:
+    reply = _api("GET", _task_path(task_id), timeout=8)
+    return reply.body if reply.ok and isinstance(reply.body, dict) else None
+
+
 def _guard_funding(args: dict) -> Optional[dict]:
+    """Funding always asks the user (whatever the amount, with or without an order_id), after the caps."""
     task_id = str(args.get("task_id") or "")
     if not task_id or not _key():
-        return None  # the tool itself explains what's missing
-    reply = _api("GET", f"/api/v1/tasks/{task_id}", timeout=8)
-    task = reply.body if reply.ok and isinstance(reply.body, dict) else None
+        return None  # the tool itself explains what's missing and moves no money
+    task = _read_task(task_id)
     if task is None:
         return {"action": "block", "message": f"boreal spend guard: couldn't read task {task_id} to check its cost, so it wasn't funded. Try again."}
     total = _task_total_cents(task)
+    what = str(task.get("description") or "")[:140]
     if total is None:
-        return {"action": "approve", "message": f"boreal spend guard: couldn't work out the cost of task {task_id}. Approve funding it?"}
+        return {"action": "approve", "message": f"Fund boreal.work task {task_id} on {_base_url()}? Its cost couldn't be read. \"{what}\""}
     max_task = int(float(_setting("max_task_usd", 10)) * 100)
     max_daily = int(float(_setting("max_daily_usd", 50)) * 100)
-    approve_over = int(float(_setting("approve_over_usd", 5)) * 100)
     spent = _spent_today_cents()
     if total > max_task:
         return {"action": "block", "message": f"boreal spend guard: this task costs {_usd(total)}, over your {_usd(max_task)} per-task limit. Raise max_task_usd in the plugin settings, or post a smaller task."}
     if spent + total > max_daily:
         return {"action": "block", "message": f"boreal spend guard: {_usd(total)} would take today's boreal.work spend to {_usd(spent + total)}, over your {_usd(max_daily)} daily limit."}
-    if total > approve_over and not args.get("order_id"):
-        what = str(task.get("description") or "")[:140]
-        return {"action": "approve", "message": f"Fund this boreal.work task for {_usd(total)} on {_base_url()}? \"{what}\" (held until the work passes; {_usd(spent)} spent today)."}
-    return None
+    return {"action": "approve", "message": f"Fund this boreal.work task for {_usd(total)} on {_base_url()}? \"{what}\" (held until the work passes; {_usd(spent)} spent today)."}
+
+
+def _guard_release(args: dict, verb: str) -> Optional[dict]:
+    """Accepting a pass or judging a result yourself decides where held money goes, so the user approves it."""
+    task_id = str(args.get("task_id") or "")
+    if not task_id or not _key():
+        return None  # the tool itself explains what's missing and moves no money
+    task = _read_task(task_id) or {}
+    pay = task.get("budget")
+    what = str(task.get("description") or "")[:140]
+    detail = f" The worker's pay is {_usd(pay)}." if isinstance(pay, int) else ""
+    about = f" \"{what}\"" if what else ""
+    return {"action": "approve", "message": f"{verb} boreal.work task {task_id} on {_base_url()}?{about}{detail} This decides where its held money goes."}
 
 
 # ---------- the verdict digest (pre_llm_call) ----------

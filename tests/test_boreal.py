@@ -86,15 +86,35 @@ class BorealTest(unittest.TestCase):
         self.ctx.tools["boreal_account"]({})
         self.assertEqual(fake.calls[0][0], "https://boreal.work")
 
-    def test_guard_lets_a_small_task_through(self):
-        self.fake({("GET", f"/api/v1/tasks/{TASK['id']}"): (200, {**TASK, "budget": 200, "platformFee": 80, "reviewFee": 10})})
-        self.assertIsNone(self.ctx.hooks["pre_tool_call"](tool_name="boreal_fund_task", args={"task_id": TASK["id"]}))
-
-    def test_guard_asks_the_owner_above_the_threshold(self):
-        self.fake({("GET", f"/api/v1/tasks/{TASK['id']}"): (200, TASK)})  # $6.25 total, threshold $5
+    def test_guard_asks_before_funding_even_a_small_task(self):
+        self.fake({("GET", f"/api/v1/tasks/{TASK['id']}"): (200, {**TASK, "budget": 100, "platformFee": 40, "reviewFee": 5})})
         verdict = self.ctx.hooks["pre_tool_call"](tool_name="boreal_fund_task", args={"task_id": TASK["id"]})
         self.assertEqual(verdict["action"], "approve")
+        self.assertIn("$1.45", verdict["message"])
+
+    def test_guard_asks_before_funding_with_an_order_id(self):
+        self.fake({("GET", f"/api/v1/tasks/{TASK['id']}"): (200, TASK)})
+        verdict = self.ctx.hooks["pre_tool_call"](tool_name="boreal_fund_task", args={"task_id": TASK["id"], "order_id": "ORDER-1"})
+        self.assertEqual(verdict["action"], "approve")
         self.assertIn("$6.25", verdict["message"])
+
+    def test_guard_asks_before_accepting_a_pass(self):
+        self.fake({("GET", f"/api/v1/tasks/{TASK['id']}"): (200, {**TASK, "status": "passed"})})
+        verdict = self.ctx.hooks["pre_tool_call"](tool_name="boreal_accept", args={"task_id": TASK["id"]})
+        self.assertEqual(verdict["action"], "approve")
+        self.assertIn("$5.00", verdict["message"])
+
+    def test_guard_asks_before_a_verdict_even_when_the_task_cannot_be_read(self):
+        self.fake({})
+        for outcome in ("pass", "fail"):
+            verdict = self.ctx.hooks["pre_tool_call"](tool_name="boreal_review", args={"task_id": TASK["id"], "outcome": outcome, "reasoning": "x"})
+            self.assertEqual(verdict["action"], "approve")
+            self.assertIn(f"a {outcome}", verdict["message"])
+
+    def test_task_ids_are_quoted_in_paths(self):
+        fake = self.fake({})
+        self.ctx.tools["boreal_get_task"]({"task_id": "../me?x=1"})
+        self.assertEqual(fake.calls[0][2], "/api/v1/tasks/..%2Fme%3Fx%3D1")
 
     def test_guard_blocks_over_the_per_task_limit(self):
         self.fake({("GET", f"/api/v1/tasks/{TASK['id']}"): (200, {**TASK, "budget": 1500})})

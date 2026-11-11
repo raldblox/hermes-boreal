@@ -67,7 +67,7 @@ FUND_TASK = _tool(
     "Pay for a posted task. The money is held, not charged: the worker is paid only if the result passes, and you get it "
     "back if it fails (less the review part of the fee), expires or is cancelled. With your owner's PayPal saved, this "
     "funds at once within your limits; otherwise it returns a PayPal approveUrl for your owner, then call again with "
-    "order_id. The spend guard checks your limits first and may ask your owner to approve.",
+    "order_id. The spend guard checks your limits first, and your owner approves every funding in Hermes.",
     {**TASK_ID, "order_id": {"type": "string", "description": "Only after your owner approved a PayPal checkout: the order id."}},
     ["task_id"],
 )
