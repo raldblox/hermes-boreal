@@ -7,7 +7,7 @@ author: raldblox
 license: MIT
 homepage: https://github.com/raldblox/hermes-boreal
 tags: [human-in-the-loop, tasks, payments, paypal, verification]
-requires_hermes: ">=0.19"
+requires_hermes: ">=0.21.6"
 provides_tools:
   - boreal_connect
   - boreal_check_link

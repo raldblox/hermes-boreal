@@ -16,6 +16,7 @@ Talks only to the configured boreal.work site (https://boreal.work by default: l
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import logging
 import re
@@ -149,6 +150,14 @@ _CLEARANCE_SECONDS = 600
 def _clearance_key(tool_name: str, args: dict) -> str:
     """The site and the exact call: an approval for one task, order or verdict clears no other."""
     return json.dumps([_base_url(), tool_name, str(args.get("task_id") or ""), str(args.get("order_id") or ""), str(args.get("outcome") or "")])
+
+
+def _rule_key(tool_name: str, args: dict) -> str:
+    """The grain of Hermes's Session and Always answers. Without one, Hermes keys them on the
+    tool's name, so "Always" on one small task would approve every later one unasked. This key
+    names one call (site, tool, task, order, outcome): such an answer can cover that call only."""
+    digest = hashlib.sha256(_clearance_key(tool_name, args).encode("utf-8")).hexdigest()[:24]
+    return f"borealwork:{tool_name}:{digest}"
 
 
 def _clear(tool_name: str, args: dict) -> None:
@@ -375,6 +384,7 @@ def guard(tool_name: str = "", args: Any = None, **_: Any) -> Optional[dict]:
             verdict = _guard_release(args, f"Record {said} on")
         # Only a call sent to the approval prompt is cleared to run; the tool refuses any other.
         if verdict and verdict.get("action") == "approve":
+            verdict["rule_key"] = _rule_key(tool_name, args)
             _clear(tool_name, args)
         return verdict
     if tool_name in {"terminal", "shell", "execute_code"}:
@@ -393,6 +403,18 @@ def _read_task(task_id: str) -> Optional[dict]:
     return reply.body if reply.ok and isinstance(reply.body, dict) else None
 
 
+def _spent_cents_for_cap() -> Optional[int]:
+    """Today's spend for the daily cap: the larger of what this plugin recorded and what
+    boreal.work says this agent funded in the last 24 hours. The site's figure survives a new
+    profile, a re-link or lost plugin state, and counts payments made any other way. None when
+    the site can't say: the cap can't be checked then, so funding is blocked."""
+    reply = _api("GET", "/api/v1/me", timeout=8)
+    site = reply.body.get("spentLast24h") if reply.ok and isinstance(reply.body, dict) else None
+    if isinstance(site, bool) or not isinstance(site, int) or site < 0:
+        return None
+    return max(_spent_today_cents(), site)
+
+
 def _guard_funding(args: dict) -> Optional[dict]:
     """Funding always asks the user (whatever the amount, with or without an order_id), after the caps."""
     task_id = str(args.get("task_id") or "")
@@ -404,15 +426,17 @@ def _guard_funding(args: dict) -> Optional[dict]:
     total = _task_total_cents(task)
     what = str(task.get("description") or "")[:140]
     if total is None:
-        return {"action": "approve", "message": f"Fund boreal.work task {task_id} on {_base_url()}? Its cost couldn't be read. \"{what}\""}
+        return {"action": "block", "message": f"boreal spend guard: task {task_id} has no readable cost, so your limits can't be checked and it wasn't funded."}
     max_task = int(float(_setting("max_task_usd", 10)) * 100)
     max_daily = int(float(_setting("max_daily_usd", 50)) * 100)
-    spent = _spent_today_cents()
     if total > max_task:
         return {"action": "block", "message": f"boreal spend guard: this task costs {_usd(total)}, over your {_usd(max_task)} per-task limit. Raise max_task_usd in the plugin settings, or post a smaller task."}
+    spent = _spent_cents_for_cap()
+    if spent is None:
+        return {"action": "block", "message": "boreal spend guard: couldn't read today's spend from boreal.work to check your daily limit, so it wasn't funded. Try again."}
     if spent + total > max_daily:
         return {"action": "block", "message": f"boreal spend guard: {_usd(total)} would take today's boreal.work spend to {_usd(spent + total)}, over your {_usd(max_daily)} daily limit."}
-    return {"action": "approve", "message": f"Fund this boreal.work task for {_usd(total)} on {_base_url()}? \"{what}\" (held until the work passes; {_usd(spent)} spent today)."}
+    return {"action": "approve", "message": f"Fund this boreal.work task for {_usd(total)} on {_base_url()}? \"{what}\" (held until the work passes; {_usd(spent)} spent in the last day)."}
 
 
 def _guard_release(args: dict, verb: str) -> Optional[dict]:

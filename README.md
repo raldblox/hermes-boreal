@@ -28,13 +28,20 @@ Under `plugins.entries.borealwork.settings` in `config.yaml`, or the Desktop's P
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `base_url` | `https://boreal.work` | Live money. Use `https://testnet.boreal.work` to try it with the PayPal sandbox. |
+| `base_url` | `https://boreal.work` | Live money. Use `https://testnet.boreal.work` to try it with the PayPal sandbox. Must be `https://`; anything else is refused (plain `http://` only for a boreal.work on `localhost`). |
 | `max_task_usd` | `10` | Most Hermes may fund for one task (pay plus fee). |
-| `max_daily_usd` | `50` | Most Hermes may fund in a day. |
+| `max_daily_usd` | `50` | Most Hermes may fund in a day. Counted as the larger of what this plugin recorded today and what boreal.work says your agent funded in the last 24 hours, so a new profile or a re-link doesn't start it again at zero. |
 | `verdict_digest` | `true` | Tell Hermes what finished at the start of each session. |
 | `api_key` | (none) | Optional `BOREAL_API_KEY`; otherwise `boreal_connect` gets one. |
 
-These limits sit on top of the ones boreal.work itself enforces for your agent (set when you approve it).
+These limits sit on top of the ones boreal.work itself enforces for your agent (set when you approve it). If the task's cost or your spend can't be read, funding is blocked, not waved through.
+
+### What the approval prompt does and doesn't cover
+
+- **Once, Session and Always all mean this one call.** Each prompt carries its own approval key (the site, the tool, the task, the PayPal order and the verdict). Answering Always on one task never approves another: the next funding, acceptance or verdict asks again.
+- **`--yolo` and `approvals.mode: off` switch the prompt off.** That is Hermes's own setting and yours to make: with either on, Hermes approves these calls without asking, and only the two limits above stand between Hermes and your money. Under cron they follow your `approvals.cron_mode`; in any other run with nobody to ask, Hermes blocks them.
+- **To be asked whatever Hermes is set to,** keep your agent on **Ask me each time** on boreal.work (My account → Agents; it is the default for a newly approved agent). Funding then holds nothing until you approve that payment on boreal.work itself, and this plugin passes you the link.
+- Needs Hermes 0.21.6 or newer, the oldest release checked to honour a plugin's approval request and its key.
 
 ## How the money works
 
@@ -42,7 +49,7 @@ Posting only quotes a task. Funding holds the money (a PayPal authorization, not
 
 ## What it touches (catalog rule 13)
 
-- **Network:** HTTPS to the configured boreal.work site only (`/api/v1/*`), from tool calls, from the spend guard (one task read before funding), and from the digest (one task list on a session's first turn).
+- **Network:** HTTPS to the configured boreal.work site only (`/api/v1/*`), from tool calls, from the spend guard (the task and your account's spend, read before funding), and from the digest (one task list on a session's first turn). A site that isn't `https://` is refused before anything is sent, and a redirect is never followed, so the agent key can't be carried to another host.
 - **Stored credentials:** the boreal.work agent key collected by `boreal_check_link`, in this plugin's own state under `<HERMES_HOME>/plugin-data/`. Beside it: today's spend, which tasks the digest has reported, and for up to ten minutes a note of each money call sent to the approval prompt.
 - **No shell commands, no background processes, no self-updates, no compiled code.** The guard reads terminal commands Hermes is about to run, only to block untagged payments.
 

@@ -73,6 +73,8 @@ class BorealTest(unittest.TestCase):
         client.call = self.real_call
 
     def fake(self, routes):
+        # boreal.work's own count of what this agent funded in the last day; nothing, unless a test says otherwise.
+        routes.setdefault(("GET", "/api/v1/me"), (200, {"network": "mainnet", "spentLast24h": 0}))
         client.call = Fake(routes)
         return client.call
 
@@ -168,6 +170,66 @@ class BorealTest(unittest.TestCase):
         self.assertEqual(result["status"], 402)
         self.assertIn("order_id", result["next"])
         self.assertEqual(boreal._spent_today_cents(), 0)
+
+    # ---- "Always" covers one call, never the tool ----
+
+    def test_each_money_call_has_its_own_approval_key(self):
+        other = "7b3c1f2e-0000-4000-8000-000000000002"
+        self.fake({("GET", f"/api/v1/tasks/{TASK['id']}"): (200, TASK), ("GET", f"/api/v1/tasks/{other}"): (200, {**TASK, "id": other})})
+        hook = self.ctx.hooks["pre_tool_call"]
+        calls = [
+            ("boreal_fund_task", {"task_id": TASK["id"]}),
+            ("boreal_fund_task", {"task_id": other}),
+            ("boreal_fund_task", {"task_id": TASK["id"], "order_id": "ORDER-1"}),
+            ("boreal_accept", {"task_id": TASK["id"]}),
+            ("boreal_review", {"task_id": TASK["id"], "outcome": "pass", "reasoning": "ok"}),
+            ("boreal_review", {"task_id": TASK["id"], "outcome": "fail", "reasoning": "no"}),
+        ]
+        keys = []
+        for tool, args in calls:
+            verdict = hook(tool_name=tool, args=args)
+            self.assertEqual(verdict["action"], "approve", tool)
+            # Hermes keys Session/Always answers on the bare tool name when a plugin gives no rule_key.
+            self.assertTrue(verdict["rule_key"].startswith(f"borealwork:{tool}:"), verdict["rule_key"])
+            self.assertNotEqual(verdict["rule_key"], tool)
+            keys.append(verdict["rule_key"])
+        self.assertEqual(len(set(keys)), len(calls))
+        # The same call asks under the same key, and another site's task under another.
+        self.assertEqual(hook(tool_name="boreal_accept", args={"task_id": TASK["id"]})["rule_key"], keys[3])
+        self.ctx.settings["base_url"] = "https://testnet.boreal.work"
+        self.ctx.state.set("keys", {"https://testnet.boreal.work": "bk_test"})
+        self.assertNotEqual(hook(tool_name="boreal_accept", args={"task_id": TASK["id"]})["rule_key"], keys[3])
+
+    # ---- the daily cap counts what boreal.work says was spent, not only what this plugin remembers ----
+
+    def test_the_daily_cap_survives_lost_plugin_state(self):
+        # A new profile: nothing recorded locally, but the agent funded $48 in the last day.
+        fake = self.fake({("GET", f"/api/v1/tasks/{TASK['id']}"): (200, TASK), ("GET", "/api/v1/me"): (200, {"spentLast24h": 4800})})
+        self.assertEqual(boreal._spent_today_cents(), 0)
+        verdict, result = self.run_tool("boreal_fund_task", {"task_id": TASK["id"]})
+        self.assertEqual(verdict["action"], "block")
+        self.assertIn("$54.25", verdict["message"])
+        self.assertIsNone(result)
+        self.assertEqual(self.money_posts(fake), [])
+
+    def test_the_daily_cap_uses_the_larger_of_the_two_counts(self):
+        boreal._record_spend(3000)
+        self.fake({("GET", f"/api/v1/tasks/{TASK['id']}"): (200, TASK), ("GET", "/api/v1/me"): (200, {"spentLast24h": 1000})})
+        verdict = self.ctx.hooks["pre_tool_call"](tool_name="boreal_fund_task", args={"task_id": TASK["id"]})
+        self.assertEqual(verdict["action"], "approve")
+        self.assertIn("$30.00 spent", verdict["message"])
+
+    def test_funding_is_blocked_when_the_spend_or_the_cost_cannot_be_read(self):
+        for me in ((500, {"error": "internal"}), (200, {"spentLast24h": "lots"}), (200, {"spentLast24h": -5}), (200, {})):
+            fake = self.fake({("GET", f"/api/v1/tasks/{TASK['id']}"): (200, TASK), ("GET", "/api/v1/me"): me})
+            verdict, result = self.run_tool("boreal_fund_task", {"task_id": TASK["id"]})
+            self.assertEqual(verdict["action"], "block", me)
+            self.assertEqual(self.money_posts(fake), [], me)
+        # A task with no readable cost can't be held to the limits either.
+        fake = self.fake({("GET", f"/api/v1/tasks/{TASK['id']}"): (200, {"id": TASK["id"], "description": "x"})})
+        verdict, _ = self.run_tool("boreal_fund_task", {"task_id": TASK["id"]})
+        self.assertEqual(verdict["action"], "block")
+        self.assertEqual(self.money_posts(fake), [])
 
     # ---- no money call reaches boreal.work unless the guard has cleared it ----
 
@@ -344,6 +406,79 @@ class BorealTest(unittest.TestCase):
         self.ctx.state.set("link", {"site": "https://boreal.work", "pollToken": "p", "approveUrl": "https://boreal.work/link/OLD", "expiresAt": "2000-01-01T00:00:00Z"})
         self.fake({("POST", "/api/v1/link/poll"): (200, {"status": "expired"}), ("POST", "/api/v1/link"): (201, {"approveUrl": "https://boreal.work/link/NEW", "pollToken": "q"})})
         self.assertEqual(json.loads(self.ctx.tools["boreal_connect"]({"agent_name": "Hermes"}))["approveUrl"], "https://boreal.work/link/NEW")
+
+
+class ClientTest(unittest.TestCase):
+    """The HTTP client itself, against servers on this machine."""
+
+    def serve(self, handler):
+        import http.server
+        import threading
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_the_key_is_never_sent_over_plain_http_to_another_host(self):
+        for site in ("http://boreal.work", "http://example.com", "ftp://boreal.work", "boreal.work", "https://user:pw@boreal.work", ""):
+            reply = client.call(site, "GET", "/api/v1/me", key="bk_secret")
+            self.assertEqual(reply.status, 0, site)
+            self.assertEqual(reply.body["error"], "insecure_site", site)
+        self.assertIsNone(client.site_refusal("https://boreal.work"))
+        self.assertIsNone(client.site_refusal("https://testnet.boreal.work"))
+        self.assertIsNone(client.site_refusal("http://localhost:3000"))
+
+    def test_a_redirect_is_never_followed_so_the_key_goes_nowhere_else(self):
+        import http.server
+
+        seen = []
+
+        class Elsewhere(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *args):
+                pass
+
+        _, elsewhere = self.serve(Elsewhere)
+
+        class Redirects(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", f"{elsewhere}/steal")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        _, site = self.serve(Redirects)
+        reply = client.call(site, "GET", "/api/v1/me", key="bk_secret")
+        self.assertEqual(reply.status, 302)
+        self.assertEqual(reply.body["error"], "redirected")
+        self.assertEqual(seen, [])
+
+    def test_a_402_still_carries_its_payment_requirement(self):
+        import http.server
+
+        class Pay(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(402)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"accepts": [{"network": "paypal"}]}')
+
+            def log_message(self, *args):
+                pass
+
+        _, site = self.serve(Pay)
+        reply = client.call(site, "POST", "/api/v1/tasks/x/fund", key="bk_secret", body={})
+        self.assertEqual(reply.status, 402)
+        self.assertEqual(reply.body["accepts"][0]["network"], "paypal")
 
 
 if __name__ == "__main__":
