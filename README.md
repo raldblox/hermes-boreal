@@ -9,7 +9,7 @@ It runs against **live boreal.work** by default (PayPal, real money). Hermes ask
 | | What it does |
 | --- | --- |
 | **12 tools** | `boreal_connect`, `boreal_check_link`, `boreal_account`, `boreal_quote`, `boreal_post_task`, `boreal_fund_task`, `boreal_list_tasks`, `boreal_get_task`, `boreal_get_submission`, `boreal_review`, `boreal_accept`, `boreal_cancel`: the whole task loop, natively, with no MCP setup. |
-| **Spend guard** (`pre_tool_call`) | Every call that moves money goes to Hermes's approval prompt, at any amount: funding a task (with or without a PayPal `order_id`), accepting a pass, and judging a result yourself with `boreal_review`. Before funding, the guard also reads the task's real total and blocks it over your per-task or daily cap. It blocks USDC payments made from a terminal that aren't paying a boreal.work task (no `boreal:<taskId>` memo). A skill can only ask Hermes to behave; the guard enforces it. |
+| **Spend guard** (`pre_tool_call`) | Every call that moves money goes to Hermes's approval prompt, at any amount: funding a task (with or without a PayPal `order_id`), accepting a pass, and judging a result yourself with `boreal_review`. Before funding, the guard also reads the task's real total and blocks it over your per-task or daily cap. It blocks USDC payments made from a terminal that aren't paying a boreal.work task (no `boreal:<taskId>` memo). The three money tools reach boreal.work only for a call the guard has just sent to that prompt: a key approved moments ago is collected by the guard before its checks, never by the tool, so the first money call after linking meets the same prompt and limits as every other, and a call the guard didn't see sends nothing. If your boreal.work account is set to approve each payment itself, `boreal_fund_task` passes on that approval link too. A skill can only ask Hermes to behave; the guard enforces it. |
 | **Verdict digest** (`pre_llm_call`) | On the first turn of each session, Hermes is told which of its tasks finished or need its review since it last looked, so results come back without anyone asking. |
 | **`/borealwork`** | Your account, today's spend against your limit, and open tasks. |
 
@@ -43,7 +43,7 @@ Posting only quotes a task. Funding holds the money (a PayPal authorization, not
 ## What it touches (catalog rule 13)
 
 - **Network:** HTTPS to the configured boreal.work site only (`/api/v1/*`), from tool calls, from the spend guard (one task read before funding), and from the digest (one task list on a session's first turn).
-- **Stored credentials:** the boreal.work agent key collected by `boreal_check_link`, in this plugin's own state under `<HERMES_HOME>/plugin-data/`. Nothing else.
+- **Stored credentials:** the boreal.work agent key collected by `boreal_check_link`, in this plugin's own state under `<HERMES_HOME>/plugin-data/`. Beside it: today's spend, which tasks the digest has reported, and for up to ten minutes a note of each money call sent to the approval prompt.
 - **No shell commands, no background processes, no self-updates, no compiled code.** The guard reads terminal commands Hermes is about to run, only to block untagged payments.
 
 ## Develop

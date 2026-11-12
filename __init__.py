@@ -19,6 +19,7 @@ import datetime as _dt
 import json
 import logging
 import re
+import time
 import urllib.parse
 from typing import Any, Optional
 
@@ -137,6 +138,53 @@ def _need_key() -> Optional[str]:
     return _out({"error": "not_connected", "message": "No boreal.work key yet. Call boreal_connect with your name, send your owner the approveUrl, then boreal_check_link."})
 
 
+# ---------- clearance: a money call reaches boreal.work only after the spend guard has seen it ----------
+
+# The guard (pre_tool_call) notes each money call it sends to Hermes's approval prompt; the tool
+# takes that note before it calls boreal.work, once. A money call the guard never saw (a key that
+# arrived after the guard ran, a hook that didn't fire) therefore stops here, having sent nothing.
+_CLEARANCE_SECONDS = 600
+
+
+def _clearance_key(tool_name: str, args: dict) -> str:
+    """The site and the exact call: an approval for one task, order or verdict clears no other."""
+    return json.dumps([_base_url(), tool_name, str(args.get("task_id") or ""), str(args.get("order_id") or ""), str(args.get("outcome") or "")])
+
+
+def _clear(tool_name: str, args: dict) -> None:
+    """Kept in the plugin's own state, so it holds however Hermes schedules hooks and tools."""
+    now = time.time()
+    cleared = {k: at for k, at in (_state_get("cleared", {}) or {}).items() if isinstance(at, (int, float)) and 0 <= now - at <= _CLEARANCE_SECONDS}
+    cleared[_clearance_key(tool_name, args)] = now
+    _state_set("cleared", cleared)
+
+
+def _take_clearance(tool_name: str, args: dict) -> bool:
+    """True once per cleared call, within the time an approval prompt can reasonably stay open."""
+    cleared = dict(_state_get("cleared", {}) or {})
+    at = cleared.pop(_clearance_key(tool_name, args), None)
+    if at is None:
+        return False
+    _state_set("cleared", cleared)
+    return isinstance(at, (int, float)) and 0 <= time.time() - at <= _CLEARANCE_SECONDS
+
+
+def _money_call_refused(tool_name: str, args: dict) -> Optional[str]:
+    """Why this money call may not go to boreal.work, or None when it may. Sends nothing itself."""
+    if not str(args.get("task_id") or ""):
+        return _out({"error": "invalid", "message": "task_id is required."})
+    # Never collect a key here: a key that arrives now arrived after the guard ran.
+    if not _key():
+        return _out({"error": "not_connected", "message": "No boreal.work key yet. Call boreal_check_link (or boreal_connect), then try again."})
+    if not _take_clearance(tool_name, args):
+        return _out({
+            "error": "not_approved",
+            "message": "boreal spend guard: this call wasn't checked and approved first, so nothing was sent. "
+            "Call it again as a normal tool call so the approval prompt and the spending limits run.",
+        })
+    return None
+
+
 def _task_path(task_id: Any, suffix: str = "") -> str:
     """The API path for a task, with its id quoted so it can't reach another route."""
     return f"/api/v1/tasks/{urllib.parse.quote(str(task_id or ''), safe='')}{suffix}"
@@ -231,8 +279,8 @@ def boreal_post_task(args: dict, **_: Any) -> str:
 
 
 def boreal_fund_task(args: dict, **_: Any) -> str:
-    if (missing := _need_key()):
-        return missing
+    if (refused := _money_call_refused("boreal_fund_task", args)):
+        return refused
     task_id = str(args.get("task_id") or "")
     before = _api("GET", _task_path(task_id))
     body = {"orderId": args["order_id"]} if args.get("order_id") else None
@@ -245,6 +293,13 @@ def boreal_fund_task(args: dict, **_: Any) -> str:
             _record_spend(total)
     if reply.status == 402:
         result["next"] = "Send your owner the approveUrl in the payment requirement; once they approve, call boreal_fund_task again with order_id."
+    approval = (reply.body or {}).get("approvalRequired") if isinstance(reply.body, dict) else None
+    if isinstance(approval, dict):
+        # The owner approves each payment on boreal.work itself: nothing is held until they do.
+        result["next"] = (
+            f"Nothing is held yet. Your owner approves each payment on boreal.work: send them {approval.get('approveUrl')}. "
+            "Once they approve, the task is funded at once: check it with boreal_get_task. If they decline, cancel it."
+        )
     return _out(result)
 
 
@@ -262,9 +317,15 @@ def _by_task(method: str, suffix: str = "", body: Any = None):
     return handler
 
 
+def boreal_accept(args: dict, **_: Any) -> str:
+    if (refused := _money_call_refused("boreal_accept", args)):
+        return refused
+    return _out(_api("POST", _task_path(args.get("task_id"), "/accept"), body={}).as_tool_result())
+
+
 def boreal_review(args: dict, **_: Any) -> str:
-    if (missing := _need_key()):
-        return missing
+    if (refused := _money_call_refused("boreal_review", args)):
+        return refused
     body = {"outcome": args.get("outcome"), "ruleIds": args.get("rule_ids") or [], "reasoning": args.get("reasoning") or ""}
     return _out(_api("POST", _task_path(args.get("task_id"), "/review"), body=body).as_tool_result())
 
@@ -280,7 +341,7 @@ HANDLERS = {
     "boreal_get_task": _by_task("GET"),
     "boreal_get_submission": _by_task("GET", "/submission"),
     "boreal_review": boreal_review,
-    "boreal_accept": _by_task("POST", "/accept", body={}),
+    "boreal_accept": boreal_accept,
     "boreal_cancel": _by_task("POST", "/cancel", body={}),
 }
 
@@ -292,15 +353,30 @@ _PAYMENT_COMMAND = re.compile(r"near-pay\.mjs\s+pay\b|\bft_transfer\b|near\s+(to
 _BOREAL_MEMO = re.compile(r"boreal:[0-9a-f-]{8,}", re.IGNORECASE)
 
 
+# The tools that move money or decide where held money goes.
+MONEY_TOOLS = {"boreal_fund_task", "boreal_accept", "boreal_review"}
+
+
+def _connected_for_guard() -> bool:
+    """True when a key is held. A link the owner just approved is collected here, before any
+    check, so the first money call after linking meets the same prompt and limits as every other."""
+    return bool(_key() or _collect_pending_key())
+
+
 def guard(tool_name: str = "", args: Any = None, **_: Any) -> Optional[dict]:
     args = args if isinstance(args, dict) else {}
-    if tool_name == "boreal_fund_task":
-        return _guard_funding(args)
-    if tool_name == "boreal_accept":
-        return _guard_release(args, "Accept the passed result of")
-    if tool_name == "boreal_review":
-        verdict = "a pass" if args.get("outcome") == "pass" else "a fail" if args.get("outcome") == "fail" else "a verdict"
-        return _guard_release(args, f"Record {verdict} on")
+    if tool_name in MONEY_TOOLS:
+        if tool_name == "boreal_fund_task":
+            verdict = _guard_funding(args)
+        elif tool_name == "boreal_accept":
+            verdict = _guard_release(args, "Accept the passed result of")
+        else:
+            said = "a pass" if args.get("outcome") == "pass" else "a fail" if args.get("outcome") == "fail" else "a verdict"
+            verdict = _guard_release(args, f"Record {said} on")
+        # Only a call sent to the approval prompt is cleared to run; the tool refuses any other.
+        if verdict and verdict.get("action") == "approve":
+            _clear(tool_name, args)
+        return verdict
     if tool_name in {"terminal", "shell", "execute_code"}:
         command = str(args.get("command") or args.get("code") or "")
         if _PAYMENT_COMMAND.search(command) and not _BOREAL_MEMO.search(command):
@@ -320,8 +396,8 @@ def _read_task(task_id: str) -> Optional[dict]:
 def _guard_funding(args: dict) -> Optional[dict]:
     """Funding always asks the user (whatever the amount, with or without an order_id), after the caps."""
     task_id = str(args.get("task_id") or "")
-    if not task_id or not _key():
-        return None  # the tool itself explains what's missing and moves no money
+    if not task_id or not _connected_for_guard():
+        return None  # nothing is cleared, so the tool says what's missing and sends nothing
     task = _read_task(task_id)
     if task is None:
         return {"action": "block", "message": f"boreal spend guard: couldn't read task {task_id} to check its cost, so it wasn't funded. Try again."}
@@ -342,8 +418,8 @@ def _guard_funding(args: dict) -> Optional[dict]:
 def _guard_release(args: dict, verb: str) -> Optional[dict]:
     """Accepting a pass or judging a result yourself decides where held money goes, so the user approves it."""
     task_id = str(args.get("task_id") or "")
-    if not task_id or not _key():
-        return None  # the tool itself explains what's missing and moves no money
+    if not task_id or not _connected_for_guard():
+        return None  # nothing is cleared, so the tool says what's missing and sends nothing
     task = _read_task(task_id) or {}
     pay = task.get("budget")
     what = str(task.get("description") or "")[:140]

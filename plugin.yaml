@@ -1,5 +1,5 @@
 name: borealwork
-version: "0.2.0"
+version: "0.2.1"
 manifest_version: 2
 api_version: 1
 description: "Give Hermes verified human hands. Post real-world tasks to boreal.work (confirm a supplier is real, check a shelf price, photograph a site), fund them from your PayPal, and get back a result checked against your criteria. Hermes asks you before any money moves, within limits you set, and finished verdicts come back at the start of each session."

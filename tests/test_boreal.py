@@ -76,6 +76,16 @@ class BorealTest(unittest.TestCase):
         client.call = Fake(routes)
         return client.call
 
+    def run_tool(self, name, args):
+        """A tool call as Hermes makes it: the pre_tool_call hook first, the tool only if it isn't blocked."""
+        verdict = self.ctx.hooks["pre_tool_call"](tool_name=name, args=args)
+        if verdict and verdict.get("action") == "block":
+            return verdict, None
+        return verdict, json.loads(self.ctx.tools[name](args))
+
+    def money_posts(self, fake):
+        return [c[2] for c in fake.calls if c[1] == "POST" and c[2].endswith(("/fund", "/accept", "/review"))]
+
     def test_registers_every_declared_tool_and_hook(self):
         self.assertEqual(set(self.ctx.tools), {s["name"] for s in boreal.schemas.ALL})
         self.assertEqual(set(self.ctx.hooks), {"pre_tool_call", "pre_llm_call"})
@@ -146,7 +156,7 @@ class BorealTest(unittest.TestCase):
             ("GET", f"/api/v1/tasks/{TASK['id']}"): (200, TASK),
             ("POST", f"/api/v1/tasks/{TASK['id']}/fund"): (200, {**TASK, "status": "posted"}),
         })
-        self.ctx.tools["boreal_fund_task"]({"task_id": TASK["id"]})
+        self.run_tool("boreal_fund_task", {"task_id": TASK["id"]})
         self.assertEqual(boreal._spent_today_cents(), 625)
 
     def test_a_402_is_passed_on_with_the_next_step(self):
@@ -154,10 +164,119 @@ class BorealTest(unittest.TestCase):
             ("GET", f"/api/v1/tasks/{TASK['id']}"): (200, TASK),
             ("POST", f"/api/v1/tasks/{TASK['id']}/fund"): (402, {"accepts": [{"network": "paypal", "extra": {"approveUrl": "https://paypal.example/approve"}}]}),
         })
-        result = json.loads(self.ctx.tools["boreal_fund_task"]({"task_id": TASK["id"]}))
+        result = self.run_tool("boreal_fund_task", {"task_id": TASK["id"]})[1]
         self.assertEqual(result["status"], 402)
         self.assertIn("order_id", result["next"])
         self.assertEqual(boreal._spent_today_cents(), 0)
+
+    # ---- no money call reaches boreal.work unless the guard has cleared it ----
+
+    def pending_link(self):
+        """The owner has approved a link, and its key hasn't been collected yet."""
+        self.ctx.state.set("keys", {})
+        self.ctx.state.set("link", {"site": "https://boreal.work", "pollToken": "p", "approveUrl": "https://boreal.work/link/X"})
+
+    def test_funding_still_asks_when_the_link_was_approved_but_not_yet_collected(self):
+        self.pending_link()
+        fake = self.fake({
+            ("POST", "/api/v1/link/poll"): (200, {"status": "approved", "key": "bk_relinked"}),
+            ("GET", f"/api/v1/tasks/{TASK['id']}"): (200, TASK),
+            ("POST", f"/api/v1/tasks/{TASK['id']}/fund"): (200, {**TASK, "status": "posted"}),
+        })
+        verdict = self.ctx.hooks["pre_tool_call"](tool_name="boreal_fund_task", args={"task_id": TASK["id"]})
+        self.assertEqual(verdict["action"], "approve")
+        self.assertIn("$6.25", verdict["message"])
+        self.assertEqual(boreal._key(), "bk_relinked")
+        self.assertEqual(self.money_posts(fake), [])  # the guard only read
+
+    def test_the_caps_apply_to_the_first_funding_after_a_relink(self):
+        self.pending_link()
+        fake = self.fake({
+            ("POST", "/api/v1/link/poll"): (200, {"status": "approved", "key": "bk_relinked"}),
+            ("GET", f"/api/v1/tasks/{TASK['id']}"): (200, {**TASK, "budget": 5000, "platformFee": 550, "reviewFee": 250}),
+        })
+        verdict, result = self.run_tool("boreal_fund_task", {"task_id": TASK["id"]})
+        self.assertEqual(verdict["action"], "block")
+        self.assertIsNone(result)
+        self.assertEqual(self.money_posts(fake), [])
+
+    def test_accept_and_review_still_ask_when_the_link_was_approved_but_not_yet_collected(self):
+        for tool, args in (("boreal_accept", {"task_id": TASK["id"]}), ("boreal_review", {"task_id": TASK["id"], "outcome": "pass", "reasoning": "ok"})):
+            self.pending_link()
+            fake = self.fake({("POST", "/api/v1/link/poll"): (200, {"status": "approved", "key": "bk_relinked"}), ("GET", f"/api/v1/tasks/{TASK['id']}"): (200, {**TASK, "status": "passed"})})
+            verdict = self.ctx.hooks["pre_tool_call"](tool_name=tool, args=args)
+            self.assertEqual(verdict["action"], "approve", tool)
+            self.assertEqual(self.money_posts(fake), [], tool)
+
+    def test_a_money_tool_never_collects_a_key_and_goes_on(self):
+        """Called without the guard (as if the hook hadn't fired), each money tool sends nothing: not even the poll."""
+        for tool, args in (
+            ("boreal_fund_task", {"task_id": TASK["id"]}),
+            ("boreal_fund_task", {"task_id": TASK["id"], "order_id": "ORDER-1"}),
+            ("boreal_accept", {"task_id": TASK["id"]}),
+            ("boreal_review", {"task_id": TASK["id"], "outcome": "fail", "rule_ids": ["R4.1"], "reasoning": "x"}),
+        ):
+            self.pending_link()
+            fake = self.fake({("POST", "/api/v1/link/poll"): (200, {"status": "approved", "key": "bk_relinked"})})
+            result = json.loads(self.ctx.tools[tool](args))
+            self.assertEqual(result["error"], "not_connected", tool)
+            self.assertEqual(fake.calls, [], tool)
+
+    def test_a_money_tool_refuses_a_call_the_guard_has_not_cleared(self):
+        for tool, args, path in (
+            ("boreal_fund_task", {"task_id": TASK["id"]}, "/fund"),
+            ("boreal_accept", {"task_id": TASK["id"]}, "/accept"),
+            ("boreal_review", {"task_id": TASK["id"], "outcome": "pass", "reasoning": "ok"}, "/review"),
+        ):
+            fake = self.fake({
+                ("GET", f"/api/v1/tasks/{TASK['id']}"): (200, {**TASK, "status": "passed" if tool != "boreal_fund_task" else "awaiting_funding"}),
+                ("POST", f"/api/v1/tasks/{TASK['id']}{path}"): (200, {**TASK, "status": "posted"}),
+            })
+            # Straight to the tool, with a key held: refused, nothing sent.
+            self.assertEqual(json.loads(self.ctx.tools[tool](args))["error"], "not_approved", tool)
+            self.assertEqual(fake.calls, [], tool)
+            # Through the guard: it runs, once.
+            verdict, result = self.run_tool(tool, args)
+            self.assertEqual(verdict["action"], "approve", tool)
+            self.assertEqual(self.money_posts(fake), [f"/api/v1/tasks/{TASK['id']}{path}"], tool)
+            # The approval was for that one call: a second needs its own.
+            self.assertEqual(json.loads(self.ctx.tools[tool](args))["error"], "not_approved", tool)
+            self.assertEqual(len(self.money_posts(fake)), 1, tool)
+
+    def test_an_approval_clears_only_the_call_it_was_given_for(self):
+        other = "7b3c1f2e-0000-4000-8000-000000000002"
+        fake = self.fake({("GET", f"/api/v1/tasks/{TASK['id']}"): (200, TASK)})
+        self.ctx.hooks["pre_tool_call"](tool_name="boreal_fund_task", args={"task_id": TASK["id"]})
+        for args in ({"task_id": other}, {"task_id": TASK["id"], "order_id": "ORDER-9"}):
+            self.assertEqual(json.loads(self.ctx.tools["boreal_fund_task"](args))["error"], "not_approved")
+        self.ctx.hooks["pre_tool_call"](tool_name="boreal_review", args={"task_id": TASK["id"], "outcome": "fail", "reasoning": "x"})
+        self.assertEqual(json.loads(self.ctx.tools["boreal_review"]({"task_id": TASK["id"], "outcome": "pass", "reasoning": "x"}))["error"], "not_approved")
+        self.assertEqual(json.loads(self.ctx.tools["boreal_accept"]({"task_id": TASK["id"]}))["error"], "not_approved")
+        self.assertEqual(self.money_posts(fake), [])
+
+    def test_a_blocked_or_unreadable_funding_is_not_cleared(self):
+        fake = self.fake({})  # the task can't be read: the guard blocks
+        verdict = self.ctx.hooks["pre_tool_call"](tool_name="boreal_fund_task", args={"task_id": TASK["id"]})
+        self.assertEqual(verdict["action"], "block")
+        self.assertEqual(json.loads(self.ctx.tools["boreal_fund_task"]({"task_id": TASK["id"]}))["error"], "not_approved")
+        self.assertEqual(self.money_posts(fake), [])
+
+    def test_with_no_key_and_no_link_money_tools_say_to_connect_and_send_nothing(self):
+        self.ctx.state.set("keys", {})
+        fake = self.fake({})
+        verdict, result = self.run_tool("boreal_fund_task", {"task_id": TASK["id"]})
+        self.assertIsNone(verdict)
+        self.assertEqual(result["error"], "not_connected")
+        self.assertEqual(fake.calls, [])
+
+    def test_an_owner_approval_on_the_site_is_passed_on_with_the_next_step(self):
+        self.fake({
+            ("GET", f"/api/v1/tasks/{TASK['id']}"): (200, TASK),
+            ("POST", f"/api/v1/tasks/{TASK['id']}/fund"): (202, {"approvalRequired": {"id": "a1", "status": "pending", "approveUrl": "https://boreal.work/approve/a1", "total": 625}}),
+        })
+        _, result = self.run_tool("boreal_fund_task", {"task_id": TASK["id"]})
+        self.assertIn("https://boreal.work/approve/a1", result["next"])
+        self.assertEqual(boreal._spent_today_cents(), 0)  # nothing is held yet
 
     def test_digest_reports_changes_once(self):
         self.fake({("GET", "/api/v1/tasks"): (200, [{**TASK, "status": "final_fail"}, {**TASK, "id": "x2", "status": "open"}])})
@@ -188,6 +307,7 @@ class BorealTest(unittest.TestCase):
     def test_status_shows_a_pending_link(self):
         self.ctx.state.set("keys", {})
         self.ctx.state.set("link", {"site": "https://boreal.work", "pollToken": "p", "approveUrl": "https://boreal.work/link/ABCD-1234"})
+        self.fake({("POST", "/api/v1/link/poll"): (200, {"status": "pending"})})
         self.assertIn("waiting for your approval", self.ctx.commands["borealwork"](""))
         self.assertIn("https://boreal.work/link/ABCD-1234", self.ctx.commands["borealwork"](""))
 
